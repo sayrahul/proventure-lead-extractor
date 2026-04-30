@@ -3,7 +3,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Proventure Lead Extractor",
-  description: "Extract business leads, contact numbers, and emails using the Google Places API.",
+  description: "Extract and manage local business leads using Google Places and Supabase.",
 };
 
 export default function RootLayout({
@@ -13,10 +13,6 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <head>
-        <link rel="preconnect" href="https://fonts.googleapis.com" />
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
-      </head>
       <body>{children}</body>
     </html>
   );

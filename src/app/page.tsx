@@ -1,246 +1,498 @@
-'use client';
+"use client";
 
-import React, { useState, useEffect } from 'react';
+import { useEffect, useMemo, useState } from "react";
+import {
+  ArrowUpRight,
+  Building2,
+  CalendarDays,
+  Database,
+  FileSpreadsheet,
+  Filter,
+  Loader2,
+  Mail,
+  MapPin,
+  Phone,
+  RefreshCw,
+  Search,
+  SlidersHorizontal,
+  Sparkles,
+  Star,
+} from "lucide-react";
+import type { Lead } from "@/lib/supabase-admin";
 
-// Replace this with your Google Apps Script Web App URL
-const APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycby-jKRb58vwoCWuSUrdHOxhEkMjAEp5hbMxNGtmSevR442bs9f_opzK0ONTBnmjlFHy3Q/exec';
+const SEARCH_DEPTHS = [
+  { value: "quick", label: "Quick", hint: "up to 20 per keyword" },
+  { value: "normal", label: "Normal", hint: "up to 40 per keyword" },
+  { value: "deep", label: "Deep", hint: "up to 60 per keyword" },
+];
+const SAVE_FILTERS = [
+  { value: "any", label: "All leads" },
+  { value: "phone", label: "Has phone" },
+  { value: "website", label: "Has website" },
+  { value: "both", label: "Phone + website" },
+];
+const KEYWORD_PRESETS = [
+  "real estate firms, property dealers, builders",
+  "architects, interior designers, construction companies",
+  "schools, colleges, coaching centers",
+  "clinics, hospitals, diagnostic centers",
+];
+
+type HistoryItem = {
+  keywords: string;
+  location: string;
+  depth: string;
+  saveFilter: string;
+  createdAt: string;
+};
+
+function scoreTone(score: number | null | undefined) {
+  if ((score ?? 0) >= 75) return "text-emerald-200 bg-emerald-400/10 border-emerald-300/20";
+  if ((score ?? 0) >= 50) return "text-cyan-200 bg-cyan-400/10 border-cyan-300/20";
+  return "text-amber-100 bg-amber-400/10 border-amber-300/20";
+}
+
+function ratingText(lead: Lead) {
+  if (!lead.google_rating) return "No reviews";
+  return `${lead.google_rating.toFixed(1)} (${lead.google_review_count ?? 0})`;
+}
 
 export default function Dashboard() {
-  const [leads, setLeads] = useState<any[]>([]);
+  const [keywords, setKeywords] = useState("real estate firms, property dealers, builders");
+  const [location, setLocation] = useState("Pune, Maharashtra");
+  const [depth, setDepth] = useState("normal");
+  const [saveFilter, setSaveFilter] = useState("any");
+  const [enrich, setEnrich] = useState(false);
+  const [tableFilter, setTableFilter] = useState("");
+  const [leads, setLeads] = useState<Lead[]>([]);
+  const [history, setHistory] = useState<HistoryItem[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  
-  // Filters
-  const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState('All');
+  const [extracting, setExtracting] = useState(false);
+  const [syncingSheet, setSyncingSheet] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [extractStatus, setExtractStatus] = useState("");
+  const [storage, setStorage] = useState<"supabase" | "local" | "">("");
+
+  async function loadLeads() {
+    setError("");
+    const response = await fetch("/api/leads", { cache: "no-store" });
+    const payload = await response.json();
+
+    if (!response.ok) {
+      throw new Error(payload.error || "Unable to load leads.");
+    }
+
+    setLeads(payload.leads ?? []);
+    setStorage(payload.storage ?? "");
+  }
 
   useEffect(() => {
-    fetchLeads();
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    loadLeads()
+      .catch((err) => setError(err.message))
+      .finally(() => setLoading(false));
+
+    const saved = window.localStorage.getItem("proventure-search-history");
+    if (saved) {
+      setHistory(JSON.parse(saved));
+    }
   }, []);
 
-  const fetchLeads = async () => {
-    if (APPS_SCRIPT_URL.includes('PASTE_YOUR')) {
-      setLoading(false);
-      setError('Please configure your Google Apps Script URL in page.tsx');
+  function rememberSearch(item: HistoryItem) {
+    const next = [item, ...history.filter((entry) => entry.keywords !== item.keywords || entry.location !== item.location)].slice(
+      0,
+      8,
+    );
+    setHistory(next);
+    window.localStorage.setItem("proventure-search-history", JSON.stringify(next));
+  }
+
+  async function extractLeads(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setExtracting(true);
+    setError("");
+    setNotice("");
+    setExtractStatus("Searching Google Places...");
+
+    const cleanKeywords = keywords
+      .split(",")
+      .map((keyword) => keyword.trim())
+      .filter(Boolean);
+    const cleanLocations = location
+      .split(/[\n,]+/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+
+    if (cleanKeywords.length === 0) {
+      setError("Enter at least one keyword, separated by commas.");
+      setExtracting(false);
+      return;
+    }
+
+    if (cleanLocations.length === 0) {
+      setError("Enter at least one valid location.");
+      setExtracting(false);
       return;
     }
 
     try {
-      // Fetch from our Next.js backend proxy to bypass browser CORS restrictions
-      const response = await fetch('/api/leads', {
-        method: 'GET',
-        cache: 'no-store'
+      const response = await fetch("/api/extract", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ keywords, location, depth, saveFilter, enrich }),
       });
-      
+      const payload = await response.json().catch(() => ({ error: "The server returned an unreadable response." }));
+
       if (!response.ok) {
-        throw new Error(`HTTP Error: ${response.status} ${response.statusText}`);
+        throw new Error(payload.error || "Extraction failed.");
       }
-      
-      const data = await response.json();
-      
-      if (data && data.error) {
-         throw new Error(data.error);
-      }
-      
-      // Sort by newest first assuming Date is the first column and parsable
-      if (Array.isArray(data)) {
-        data.reverse();
-        setLeads(data);
-      } else {
-        console.warn("Expected array but got:", data);
-        setLeads([]);
-      }
-      setLoading(false);
-    } catch (err: any) {
-      console.error("Fetch error details:", err);
-      setError(`Failed to fetch leads: ${err.message}. Please ensure your Apps Script is deployed with "Who has access" set to "Anyone".`);
-      setLoading(false);
+
+      setExtractStatus("Saving and refreshing leads...");
+      await loadLeads();
+      rememberSearch({ keywords, location, depth, saveFilter, createdAt: new Date().toISOString() });
+      setNotice(
+        `${payload.depth ?? "Normal"} search checked ${payload.discovered ?? 0} Google result${
+          (payload.discovered ?? 0) === 1 ? "" : "s"
+        }, kept ${payload.relevant ?? 0} relevant result${(payload.relevant ?? 0) === 1 ? "" : "s"} across ${
+          payload.searched ?? cleanKeywords.length
+        } keyword group${
+          (payload.searched ?? cleanKeywords.length) === 1 ? "" : "s"
+        } and ${payload.locations ?? cleanLocations.length} location${
+          (payload.locations ?? cleanLocations.length) === 1 ? "" : "s"
+        }. Saved ${payload.saved ?? 0} lead${(payload.saved ?? 0) === 1 ? "" : "s"}.`,
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Extraction failed.");
+    } finally {
+      setExtracting(false);
+      setExtractStatus("");
     }
-  };
+  }
 
-  const filteredLeads = leads.filter((lead) => {
-    const matchesSearch = 
-      (lead['Business Name']?.toLowerCase() || '').includes(search.toLowerCase()) || 
-      (lead['Address']?.toLowerCase() || '').includes(search.toLowerCase());
-      
-    const matchesStatus = statusFilter === 'All' || lead['Status'] === statusFilter;
-    
-    return matchesSearch && matchesStatus;
-  });
+  const filteredLeads = useMemo(() => {
+    const needle = tableFilter.trim().toLowerCase();
 
-  const renderRating = (ratingStr: string) => {
-    if (!ratingStr || ratingStr === 'N/A' || ratingStr === '0') {
-      return <span className="text-gray-500 text-sm">N/A</span>;
-    }
-    
-    const rating = parseFloat(ratingStr);
-    let colorClass = 'bg-gray-800 text-gray-300';
-    if (rating >= 4.5) colorClass = 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30';
-    else if (rating >= 4.0) colorClass = 'bg-blue-500/20 text-blue-400 border border-blue-500/30';
-    else if (rating < 3.5) colorClass = 'bg-red-500/20 text-red-400 border border-red-500/30';
+    return leads.filter((lead) => {
+      return (
+        !needle ||
+        [lead.business_name, lead.phone_number, lead.website, lead.address, lead.email, lead.search_query]
+          .filter(Boolean)
+          .some((value) => String(value).toLowerCase().includes(needle))
+      );
+    });
+  }, [leads, tableFilter]);
 
-    return (
-      <div className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold ${colorClass}`}>
-        <span>{rating.toFixed(1)}</span>
-        <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
-          <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
-        </svg>
-      </div>
-    );
-  };
+  const stats = useMemo(() => {
+    return {
+      total: leads.length,
+      phone: leads.filter((lead) => lead.phone_number).length,
+      email: leads.filter((lead) => lead.email).length,
+      reviewed: leads.filter((lead) => lead.google_rating).length,
+    };
+  }, [leads]);
 
-  const renderStatus = (status: string) => {
-    let colorClass = 'bg-gray-800 text-gray-300 border-gray-700';
-    if (status === 'New') colorClass = 'bg-blue-500/10 text-blue-400 border-blue-500/20';
-    if (status === 'Contacted') colorClass = 'bg-amber-500/10 text-amber-400 border-amber-500/20';
-    if (status === 'Converted') colorClass = 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20';
-    if (status === 'Rejected') colorClass = 'bg-red-500/10 text-red-400 border-red-500/20';
+  async function syncGoogleSheet() {
+    setSyncingSheet(true);
+    setError("");
+    setNotice("");
 
-    return (
-      <span className={`px-2 py-1 text-xs font-medium rounded border ${colorClass}`}>
-        {status || 'New'}
-      </span>
-    );
-  };
-
-  const formatDate = (dateStr: string) => {
-    if (!dateStr) return 'N/A';
     try {
-      const d = new Date(dateStr);
-      return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-    } catch {
-      return dateStr;
+      const response = await fetch("/api/sheets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ leads: filteredLeads }),
+      });
+      const payload = await response.json();
+
+      if (!response.ok) {
+        throw new Error(payload.error || "Google Sheet sync failed.");
+      }
+
+      setNotice(`Synced ${payload.added ?? filteredLeads.length} lead${filteredLeads.length === 1 ? "" : "s"} to Google Sheet.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Google Sheet sync failed.");
+    } finally {
+      setSyncingSheet(false);
     }
-  };
+  }
 
   return (
-    <div className="min-h-screen bg-[#0a0a0a] text-slate-200 font-sans selection:bg-blue-500/30 p-6 md:p-12">
-      
-      {/* Header */}
-      <header className="mb-10 flex flex-col md:flex-row justify-between items-start md:items-end border-b border-white/5 pb-6">
-        <div>
-          <h1 className="text-3xl font-bold bg-gradient-to-r from-blue-400 to-indigo-400 bg-clip-text text-transparent">
-            Proventure Digital
-          </h1>
-          <p className="text-slate-400 mt-1">Lead Management SaaS Dashboard</p>
-        </div>
-        
-        <div className="mt-4 md:mt-0 flex gap-4">
-          <button onClick={fetchLeads} className="px-4 py-2 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg text-sm font-medium transition-colors flex items-center gap-2">
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
-            Refresh Data
-          </button>
-        </div>
-      </header>
-
-      {/* Filters */}
-      <div className="flex flex-col md:flex-row gap-4 mb-6">
-        <div className="relative flex-1 max-w-md">
-          <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-            <svg className="w-4 h-4 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
-          </div>
-          <input 
-            type="text" 
-            placeholder="Search by Name or Address..." 
-            className="w-full bg-white/5 border border-white/10 rounded-lg pl-10 pr-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500/50 transition-all placeholder-slate-500"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-          />
-        </div>
-        
-        <div className="flex-shrink-0">
-          <select 
-            className="bg-white/5 border border-white/10 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 appearance-none pr-10 text-slate-200"
-            style={{ backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`, backgroundPosition: 'right 0.5rem center', backgroundRepeat: 'no-repeat', backgroundSize: '1.5em 1.5em' }}
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value)}
-          >
-            <option value="All" className="bg-slate-900">All Statuses</option>
-            <option value="New" className="bg-slate-900">New</option>
-            <option value="Contacted" className="bg-slate-900">Contacted</option>
-            <option value="Converted" className="bg-slate-900">Converted</option>
-            <option value="Rejected" className="bg-slate-900">Rejected</option>
-          </select>
-        </div>
-      </div>
-
-      {/* Main Content Area */}
-      {error ? (
-        <div className="bg-red-500/10 border border-red-500/20 text-red-400 p-4 rounded-lg flex items-start gap-3">
-          <svg className="w-5 h-5 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
+    <main className="min-h-screen bg-[#071013] text-slate-100">
+      <div className="mx-auto flex min-h-screen w-full max-w-7xl flex-col px-4 py-6 sm:px-6 lg:px-8">
+        <header className="flex flex-col gap-5 border-b border-white/10 pb-6 lg:flex-row lg:items-end lg:justify-between">
           <div>
-            <h3 className="font-semibold">Connection Error</h3>
-            <p className="text-sm mt-1">{error}</p>
+            <div className="mb-3 inline-flex items-center gap-2 rounded-md border border-emerald-300/20 bg-emerald-400/10 px-3 py-1 text-xs font-medium text-emerald-100">
+              <Sparkles className="h-3.5 w-3.5" />
+              Lead extraction workspace
+            </div>
+            <h1 className="text-3xl font-semibold tracking-normal text-white sm:text-4xl">Proventure Lead Extractor</h1>
           </div>
-        </div>
-      ) : loading ? (
-        <div className="flex flex-col items-center justify-center py-20 text-slate-400">
-          <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin mb-4"></div>
-          <p>Syncing with Google Sheets database...</p>
-        </div>
-      ) : leads.length === 0 ? (
-        <div className="bg-white/5 border border-white/10 rounded-xl p-10 text-center text-slate-400">
-          <p>No leads found in the database. Run your Python script to populate Google Sheets!</p>
-        </div>
-      ) : (
-        <div className="bg-white/[0.02] border border-white/5 rounded-xl overflow-hidden shadow-2xl backdrop-blur-sm">
+
+          <div className="grid grid-cols-4 gap-2 text-center sm:min-w-[32rem]">
+            {[
+              ["Leads", stats.total],
+              ["Phones", stats.phone],
+              ["Emails", stats.email],
+              ["Reviewed", stats.reviewed],
+            ].map(([label, value]) => (
+              <div key={label} className="rounded-lg border border-white/10 bg-white/[0.04] px-4 py-3">
+                <div className="text-2xl font-semibold">{value}</div>
+                <div className="text-xs text-slate-400">{label}</div>
+              </div>
+            ))}
+          </div>
+        </header>
+
+        <section className="grid gap-4 py-6 xl:grid-cols-[1fr_22rem]">
+          <form onSubmit={extractLeads} className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
+            <div className="grid gap-3 lg:grid-cols-[1.4fr_1fr_0.8fr]">
+              <label>
+                <span className="mb-2 block text-xs font-medium uppercase tracking-wide text-slate-400">Keywords</span>
+                <div className="relative">
+                  <Search className="pointer-events-none absolute left-4 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-500" />
+                  <input
+                    value={keywords}
+                    onChange={(event) => setKeywords(event.target.value)}
+                    className="h-12 w-full rounded-lg border border-white/10 bg-slate-950/70 pl-12 pr-4 text-sm text-white outline-none transition focus:border-emerald-400/70 focus:ring-4 focus:ring-emerald-500/15"
+                  />
+                </div>
+              </label>
+              <label>
+                <span className="mb-2 block text-xs font-medium uppercase tracking-wide text-slate-400">Locations</span>
+                <div className="relative">
+                  <MapPin className="pointer-events-none absolute left-4 top-4 h-5 w-5 text-slate-500" />
+                  <textarea
+                    value={location}
+                    onChange={(event) => setLocation(event.target.value)}
+                    rows={1}
+                    placeholder="Pune, Mumbai, Nashik"
+                    className="min-h-12 w-full resize-y rounded-lg border border-white/10 bg-slate-950/70 py-3 pl-12 pr-4 text-sm text-white outline-none transition focus:border-emerald-400/70 focus:ring-4 focus:ring-emerald-500/15"
+                  />
+                </div>
+              </label>
+              <label>
+                <span className="mb-2 block text-xs font-medium uppercase tracking-wide text-slate-400">Depth</span>
+                <div className="relative">
+                  <SlidersHorizontal className="pointer-events-none absolute left-4 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-500" />
+                  <select
+                    value={depth}
+                    onChange={(event) => setDepth(event.target.value)}
+                    className="h-12 w-full rounded-lg border border-white/10 bg-slate-950/70 pl-12 pr-9 text-sm text-white outline-none transition focus:border-emerald-400/70"
+                  >
+                    {SEARCH_DEPTHS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label} - {option.hint}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </label>
+            </div>
+
+            <div className="mt-3 grid gap-3 lg:grid-cols-[1fr_auto_auto] lg:items-end">
+              <label>
+                <span className="mb-2 block text-xs font-medium uppercase tracking-wide text-slate-400">Save filter</span>
+                <select
+                  value={saveFilter}
+                  onChange={(event) => setSaveFilter(event.target.value)}
+                  className="h-11 w-full rounded-lg border border-white/10 bg-slate-950/70 px-3 text-sm text-white outline-none transition focus:border-emerald-400/70"
+                >
+                  {SAVE_FILTERS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="flex h-11 items-center gap-2 rounded-lg border border-white/10 bg-slate-950/70 px-3 text-sm text-slate-200">
+                <input checked={enrich} onChange={(event) => setEnrich(event.target.checked)} type="checkbox" />
+                Enrich email/social
+              </label>
+              <button
+                type="submit"
+                disabled={extracting}
+                className="inline-flex h-11 items-center justify-center gap-2 rounded-lg bg-emerald-400 px-5 text-sm font-semibold text-slate-950 transition hover:bg-emerald-300 disabled:cursor-not-allowed disabled:bg-emerald-400/60"
+              >
+                {extracting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Building2 className="h-4 w-4" />}
+                Extract
+              </button>
+            </div>
+
+            <div className="mt-3 flex flex-wrap gap-2">
+              {KEYWORD_PRESETS.map((preset) => (
+                <button
+                  key={preset}
+                  type="button"
+                  onClick={() => setKeywords(preset)}
+                  className="rounded-md border border-white/10 bg-white/[0.04] px-3 py-2 text-xs text-slate-300 transition hover:bg-white/[0.08]"
+                >
+                  {preset}
+                </button>
+              ))}
+            </div>
+          </form>
+
+          <aside className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
+            <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-white">
+              <CalendarDays className="h-4 w-4 text-emerald-300" />
+              Search history
+            </div>
+            <div className="space-y-2">
+              {history.length === 0 ? (
+                <div className="text-sm text-slate-500">No searches yet.</div>
+              ) : (
+                history.map((item) => (
+                  <button
+                    key={`${item.createdAt}-${item.keywords}`}
+                    type="button"
+                    onClick={() => {
+                      setKeywords(item.keywords);
+                      setLocation(item.location);
+                      setDepth(item.depth);
+                      setSaveFilter(item.saveFilter);
+                    }}
+                    className="w-full rounded-md border border-white/10 bg-slate-950/50 p-3 text-left text-xs text-slate-300 transition hover:bg-white/[0.06]"
+                  >
+                    <div className="truncate font-medium text-slate-100">{item.keywords}</div>
+                    <div className="mt-1 truncate text-slate-500">{item.location}</div>
+                  </button>
+                ))
+              )}
+            </div>
+          </aside>
+        </section>
+
+        {(extracting || error || notice || storage === "local") && (
+          <section className="mb-4 space-y-3">
+            {extracting && (
+              <div className="flex items-center gap-3 rounded-lg border border-emerald-300/20 bg-emerald-400/10 px-4 py-3 text-sm text-emerald-100">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                {extractStatus || "Working..."}
+              </div>
+            )}
+            {error && (
+              <div className="rounded-lg border border-amber-300/20 bg-amber-400/10 px-4 py-3 text-sm text-amber-100">
+                {error}
+              </div>
+            )}
+            {notice && (
+              <div className="rounded-lg border border-cyan-300/20 bg-cyan-400/10 px-4 py-3 text-sm text-cyan-100">
+                {notice}
+              </div>
+            )}
+            {storage === "local" && (
+              <div className="inline-flex items-center gap-2 rounded-lg border border-white/10 bg-white/[0.04] px-4 py-3 text-sm text-slate-300">
+                <Database className="h-4 w-4 text-emerald-300" />
+                Supabase is not configured, so leads are being saved locally in this project.
+              </div>
+            )}
+          </section>
+        )}
+
+        <section className="mb-4 flex flex-col gap-3 rounded-lg border border-white/10 bg-white/[0.035] p-3 xl:flex-row xl:items-center xl:justify-between">
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <label className="relative min-w-0 sm:w-80">
+              <Filter className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
+              <input
+                value={tableFilter}
+                onChange={(event) => setTableFilter(event.target.value)}
+                placeholder="Filter name, phone, email, area"
+                className="h-10 w-full rounded-lg border border-white/10 bg-slate-950/70 pl-10 pr-3 text-sm text-white outline-none transition focus:border-emerald-400/70"
+              />
+            </label>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button onClick={() => loadLeads().catch((err) => setError(err.message))} className="inline-flex h-10 items-center gap-2 rounded-lg border border-white/10 bg-white/[0.04] px-4 text-sm text-slate-200">
+              <RefreshCw className="h-4 w-4" />
+              Refresh
+            </button>
+            <button
+              onClick={syncGoogleSheet}
+              disabled={filteredLeads.length === 0 || syncingSheet}
+              className="inline-flex h-10 items-center gap-2 rounded-lg border border-emerald-300/20 bg-emerald-400/10 px-4 text-sm font-medium text-emerald-100 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <FileSpreadsheet className="h-4 w-4" />
+              {syncingSheet ? "Syncing..." : "Sync Google Sheet"}
+            </button>
+          </div>
+        </section>
+
+        <section className="min-h-0 flex-1 overflow-hidden rounded-lg border border-white/10 bg-slate-950/55 shadow-2xl shadow-black/20">
           <div className="overflow-x-auto custom-scrollbar">
-            <table className="w-full text-left text-sm whitespace-nowrap">
-              <thead className="bg-white/[0.04] border-b border-white/10 text-slate-300 font-semibold">
+            <table className="w-full min-w-[1080px] border-collapse text-left text-sm">
+              <thead className="border-b border-white/10 bg-white/[0.04] text-xs uppercase tracking-wide text-slate-400">
                 <tr>
-                  <th className="px-6 py-4">Date Added</th>
-                  <th className="px-6 py-4">Business Name</th>
-                  <th className="px-6 py-4">Rating</th>
-                  <th className="px-6 py-4">Contact</th>
-                  <th className="px-6 py-4">Website</th>
-                  <th className="px-6 py-4">Status</th>
+                  <th className="px-4 py-4 font-semibold">Lead</th>
+                  <th className="px-4 py-4 font-semibold">Contact</th>
+                  <th className="px-4 py-4 font-semibold">Google Reviews</th>
+                  <th className="px-4 py-4 font-semibold">Quality</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/5">
-                {filteredLeads.map((lead, idx) => (
-                  <tr key={idx} className="hover:bg-white/[0.02] transition-colors group">
-                    <td className="px-6 py-4 text-slate-400">
-                      {formatDate(lead['Date'])}
-                    </td>
-                    <td className="px-6 py-4">
-                      <div className="font-medium text-slate-200">{lead['Business Name']}</div>
-                      <div className="text-xs text-slate-500 truncate max-w-[250px] mt-1" title={lead['Address']}>{lead['Address']}</div>
-                    </td>
-                    <td className="px-6 py-4">
-                      {renderRating(lead['Rating'])}
-                    </td>
-                    <td className="px-6 py-4">
-                      <div className="text-slate-300 font-medium">{lead['Phone'] !== 'No Number' ? lead['Phone'] : <span className="text-slate-600">N/A</span>}</div>
-                    </td>
-                    <td className="px-6 py-4">
-                      {lead['Website'] !== 'No Website' && lead['Website'] ? (
-                        <a href={lead['Website']} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300 transition-colors inline-flex items-center gap-1">
-                          Visit Site
-                          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"></path></svg>
-                        </a>
-                      ) : (
-                        <span className="text-slate-600">N/A</span>
-                      )}
-                    </td>
-                    <td className="px-6 py-4">
-                      {renderStatus(lead['Status'])}
+                {loading ? (
+                  Array.from({ length: 6 }).map((_, index) => (
+                    <tr key={index}>
+                      {Array.from({ length: 4 }).map((__, cellIndex) => (
+                        <td key={cellIndex} className="px-4 py-4">
+                          <div className="h-4 animate-pulse rounded bg-white/10" />
+                        </td>
+                      ))}
+                    </tr>
+                  ))
+                ) : filteredLeads.length === 0 ? (
+                  <tr>
+                    <td colSpan={4} className="px-5 py-16 text-center text-slate-400">
+                      {leads.length === 0 ? "No leads saved yet." : "No leads match this filter."}
                     </td>
                   </tr>
-                ))}
+                ) : (
+                  filteredLeads.map((lead) => (
+                    <tr key={lead.id} className="transition hover:bg-white/[0.03]">
+                      <td className="px-4 py-4">
+                        <div className="max-w-72 truncate font-medium text-white" title={lead.business_name}>
+                          {lead.business_name}
+                        </div>
+                        <div className="mt-1 max-w-80 truncate text-xs text-slate-500" title={lead.address ?? ""}>
+                          {lead.address || "N/A"}
+                        </div>
+                        {lead.website && (
+                          <a href={lead.website} target="_blank" rel="noreferrer" className="mt-2 inline-flex items-center gap-1 text-xs text-cyan-300 hover:text-cyan-200">
+                            Website <ArrowUpRight className="h-3 w-3" />
+                          </a>
+                        )}
+                      </td>
+                      <td className="px-4 py-4">
+                        <div className="space-y-1">
+                          <div className="inline-flex items-center gap-2 text-slate-200">
+                            <Phone className="h-3.5 w-3.5 text-emerald-300" />
+                            {lead.phone_number || "N/A"}
+                          </div>
+                          <div className="flex items-center gap-2 text-slate-300">
+                            <Mail className="h-3.5 w-3.5 text-cyan-300" />
+                            <span className="max-w-48 truncate">{lead.email || "N/A"}</span>
+                          </div>
+                        </div>
+                      </td>
+                      <td className="px-4 py-4">
+                        <span className="inline-flex items-center gap-1 rounded-md border border-yellow-300/20 bg-yellow-400/10 px-2.5 py-1 text-xs font-semibold text-yellow-100">
+                          <Star className="h-3.5 w-3.5 fill-current" />
+                          {ratingText(lead)}
+                        </span>
+                      </td>
+                      <td className="px-4 py-4">
+                        <span className={`inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs font-semibold ${scoreTone(lead.quality_score)}`}>
+                          {lead.quality_score ?? 0}
+                        </span>
+                      </td>
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
           </div>
-          {filteredLeads.length === 0 && (
-            <div className="p-10 text-center text-slate-500">
-              No leads match your current search and filter criteria.
-            </div>
-          )}
-          <div className="bg-white/[0.02] border-t border-white/5 px-6 py-3 text-xs text-slate-500 flex justify-between">
-            <span>Showing {filteredLeads.length} of {leads.length} leads</span>
-            <span>Connected to Google Sheets API</span>
-          </div>
-        </div>
-      )}
-    </div>
+        </section>
+      </div>
+    </main>
   );
 }

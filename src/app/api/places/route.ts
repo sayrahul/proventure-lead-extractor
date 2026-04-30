@@ -1,26 +1,53 @@
 import { NextResponse } from 'next/server';
 
+type GooglePlace = {
+  id?: string;
+  displayName?: {
+    text?: string;
+  };
+  formattedAddress?: string;
+  websiteUri?: string;
+  nationalPhoneNumber?: string;
+};
+
+type GoogleTextSearchResponse = {
+  places?: GooglePlace[];
+  nextPageToken?: string;
+  error?: {
+    message?: string;
+  };
+};
+
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
-  const query = searchParams.get('query');
-  const location = searchParams.get('location');
+  const query = searchParams.get('query')?.trim();
+  const location = searchParams.get('location')?.trim();
 
   if (!query || !location) {
     return NextResponse.json({ error: 'Both Query and Location are required' }, { status: 400 });
   }
 
-  const API_KEY = 'AIzaSyChCiBFbMtHMEhE_Cqa0lORUps3GkQhV0A';
+  const API_KEY = process.env.GOOGLE_PLACES_API_KEY;
+
+  if (!API_KEY) {
+    return NextResponse.json({ error: 'Missing GOOGLE_PLACES_API_KEY' }, { status: 500 });
+  }
+
   const textQuery = `${query} in ${location}`;
   
   try {
     const searchUrl = 'https://places.googleapis.com/v1/places:searchText';
     
-    let allPlaces: any[] = [];
+    let allPlaces: GooglePlace[] = [];
     let pageToken = '';
     
     // We will fetch up to 3 pages (Google's max is usually 60 results for text search)
     for (let i = 0; i < 3; i++) {
-      const bodyPayload: any = {
+      const bodyPayload: {
+        textQuery: string;
+        pageSize: number;
+        pageToken?: string;
+      } = {
         textQuery: textQuery,
         pageSize: 20
       };
@@ -39,7 +66,7 @@ export async function GET(request: Request) {
         body: JSON.stringify(bodyPayload)
       });
 
-      const data = await response.json();
+      const data = (await response.json()) as GoogleTextSearchResponse;
 
       if (data.error) {
         console.error('Google API Error:', data.error);
@@ -66,7 +93,7 @@ export async function GET(request: Request) {
       return NextResponse.json({ leads: [] });
     }
 
-    const leads = allPlaces.map((place: any) => ({
+    const leads = allPlaces.map((place) => ({
       id: place.id,
       name: place.displayName?.text || 'N/A',
       phone: place.nationalPhoneNumber || 'No Number',
