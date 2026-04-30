@@ -20,6 +20,9 @@ import {
   ChevronUp,
   ChevronLeft,
   ChevronRight,
+  Download,
+  CheckSquare,
+  Trash2,
 } from "lucide-react";
 import type { Lead } from "@/lib/supabase-admin";
 
@@ -86,6 +89,37 @@ export default function Dashboard() {
   const [sortField, setSortField] = useState<keyof Lead | "">("");
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
   const [apiUsage, setApiUsage] = useState(0);
+
+  const [minRating, setMinRating] = useState(false);
+  const [hasPhone, setHasPhone] = useState(false);
+  const [hasWebsite, setHasWebsite] = useState(false);
+  const [maxRequests, setMaxRequests] = useState<number | "">("");
+  const [selectedLeadIds, setSelectedLeadIds] = useState<Set<string>>(new Set());
+
+  function exportCSV() {
+    if (filteredLeads.length === 0) return;
+    const headers = ["Business Name", "Phone", "Website", "Address", "Rating", "Reviews", "Search Query"];
+    const rows = filteredLeads.map(lead => [
+      `"${(lead.business_name || "").replace(/"/g, '""')}"`,
+      `"${(lead.phone_number || "").replace(/"/g, '""')}"`,
+      `"${(lead.website || "").replace(/"/g, '""')}"`,
+      `"${(lead.address || "").replace(/"/g, '""')}"`,
+      lead.google_rating || "",
+      lead.google_review_count || "",
+      `"${(lead.search_query || "").replace(/"/g, '""')}"`
+    ].join(","));
+    
+    const csvContent = [headers.join(","), ...rows].join("\n");
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    link.setAttribute("download", "leads_export.csv");
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  }
 
   async function loadLeads() {
     setError("");
@@ -157,7 +191,7 @@ export default function Dashboard() {
       const response = await fetch("/api/extract", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ keywords, location, depth, saveFilter }),
+        body: JSON.stringify({ keywords, location, depth, saveFilter, maxRequests: maxRequests === "" ? undefined : maxRequests }),
       });
       const payload = await response.json().catch(() => ({ error: "The server returned an unreadable response." }));
 
@@ -196,12 +230,17 @@ export default function Dashboard() {
     const needle = tableFilter.trim().toLowerCase();
 
     let result = leads.filter((lead) => {
-      return (
+      const matchText = (
         !needle ||
         [lead.business_name, lead.phone_number, lead.website, lead.address, lead.search_query]
           .filter(Boolean)
           .some((value) => String(value).toLowerCase().includes(needle))
       );
+      const mRating = minRating ? (lead.google_rating && lead.google_rating >= 4.0) : true;
+      const mPhone = hasPhone ? Boolean(lead.phone_number) : true;
+      const mWebsite = hasWebsite ? Boolean(lead.website) : true;
+      
+      return matchText && mRating && mPhone && mWebsite;
     });
 
     if (sortField) {
@@ -219,7 +258,7 @@ export default function Dashboard() {
     }
 
     return result;
-  }, [leads, tableFilter, sortField, sortOrder]);
+  }, [leads, tableFilter, sortField, sortOrder, minRating, hasPhone, hasWebsite]);
 
   const paginatedLeads = useMemo(() => {
     const start = (currentPage - 1) * itemsPerPage;
@@ -240,28 +279,78 @@ export default function Dashboard() {
     };
   }, [leads]);
 
-  async function syncGoogleSheet() {
+  async function fetchWithRetry(url: string, options: any, maxRetries = 3) {
+    for (let i = 0; i < maxRetries; i++) {
+      try {
+        const res = await fetch(url, options);
+        if (res.ok) return res;
+        throw new Error(`Status ${res.status}`);
+      } catch (err) {
+        if (i === maxRetries - 1) throw err;
+        await new Promise(r => setTimeout(r, 1000 * Math.pow(2, i)));
+      }
+    }
+  }
+
+  async function syncGoogleSheet(selectedOnly = false) {
     setSyncingSheet(true);
     setError("");
     setNotice("");
 
-    try {
-      const response = await fetch("/api/sheets", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ leads: filteredLeads }),
-      });
-      const payload = await response.json();
+    const targetLeads = selectedOnly ? filteredLeads.filter(l => selectedLeadIds.has(l.id)) : filteredLeads;
+    if (targetLeads.length === 0) {
+      setSyncingSheet(false);
+      return;
+    }
 
-      if (!response.ok) {
-        throw new Error(payload.error || "Google Sheet sync failed.");
+    const chunkSize = 200;
+    const chunks = [];
+    for (let i = 0; i < targetLeads.length; i += chunkSize) {
+      chunks.push(targetLeads.slice(i, i + chunkSize));
+    }
+
+    try {
+      let totalAdded = 0;
+      for (let i = 0; i < chunks.length; i++) {
+        setNotice(`Syncing chunk ${i + 1} of ${chunks.length}...`);
+        const response = await fetchWithRetry("/api/sheets", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ leads: chunks[i] }),
+        });
+        const payload = await (response as Response).json();
+        totalAdded += payload.added || chunks[i].length;
       }
 
-      setNotice(`Synced ${payload.added ?? filteredLeads.length} lead${filteredLeads.length === 1 ? "" : "s"} to Google Sheet.`);
+      setNotice(`Successfully synced ${totalAdded} lead${totalAdded === 1 ? "" : "s"} to Google Sheet.`);
+      if (selectedOnly) setSelectedLeadIds(new Set());
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Google Sheet sync failed.");
+      setError(err instanceof Error ? err.message : "Google Sheet sync failed due to network error.");
     } finally {
       setSyncingSheet(false);
+    }
+  }
+
+  async function deleteSelected() {
+    if (selectedLeadIds.size === 0) return;
+    setDeduping(true);
+    setError("");
+    setNotice("Deleting selected leads...");
+    try {
+      const leadsToDelete = leads.filter(l => selectedLeadIds.has(l.id));
+      const response = await fetchWithRetry("/api/sheets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "delete", leads: leadsToDelete }),
+      });
+      if (!(response as Response).ok) throw new Error("Failed to delete selected leads.");
+      setNotice(`Successfully deleted ${selectedLeadIds.size} lead(s).`);
+      setSelectedLeadIds(new Set());
+      await loadLeads();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to delete.");
+    } finally {
+      setDeduping(false);
     }
   }
 
@@ -335,7 +424,7 @@ export default function Dashboard() {
 
         <section className="grid gap-4 py-6 xl:grid-cols-[1fr_22rem]">
           <form onSubmit={extractLeads} className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
-            <div className="grid gap-3 lg:grid-cols-[1.4fr_1fr_0.8fr]">
+            <div className="grid gap-3 lg:grid-cols-[1.4fr_1fr_0.8fr_0.8fr]">
               <datalist id="keyword-suggestions">
                 {KEYWORD_PRESETS.map((p) => <option key={p} value={p} />)}
               </datalist>
@@ -382,6 +471,20 @@ export default function Dashboard() {
                       </option>
                     ))}
                   </select>
+                </div>
+              </label>
+              <label>
+                <span className="mb-2 block text-xs font-medium uppercase tracking-wide text-slate-400">Max Requests</span>
+                <div className="relative">
+                  <Activity className="pointer-events-none absolute left-4 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-500" />
+                  <input
+                    type="number"
+                    min="1"
+                    placeholder="E.g. 100"
+                    value={maxRequests}
+                    onChange={(event) => setMaxRequests(event.target.value === "" ? "" : Number(event.target.value))}
+                    className="h-12 w-full rounded-lg border border-white/10 bg-slate-950/70 pl-12 pr-4 text-sm text-white outline-none transition focus:border-emerald-400/70 focus:ring-4 focus:ring-emerald-500/15"
+                  />
                 </div>
               </label>
             </div>
@@ -477,7 +580,7 @@ export default function Dashboard() {
         )}
 
         <section className="mb-4 flex flex-col gap-3 rounded-lg border border-white/10 bg-white/[0.035] p-3 xl:flex-row xl:items-center xl:justify-between">
-          <div className="flex flex-col gap-2 sm:flex-row">
+          <div className="flex flex-col gap-2 sm:flex-row items-center">
             <label className="relative min-w-0 sm:w-80">
               <Filter className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
               <input
@@ -487,19 +590,53 @@ export default function Dashboard() {
                 className="h-10 w-full rounded-lg border border-white/10 bg-slate-950/70 pl-10 pr-3 text-sm text-white outline-none transition focus:border-emerald-400/70"
               />
             </label>
+            <div className="flex flex-wrap items-center gap-4 sm:border-l border-white/10 sm:pl-4">
+              <label className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer hover:text-white transition">
+                <input type="checkbox" checked={minRating} onChange={e => setMinRating(e.target.checked)} className="rounded border-white/10 bg-black" />
+                4.0+ Rating
+              </label>
+              <label className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer hover:text-white transition">
+                <input type="checkbox" checked={hasPhone} onChange={e => setHasPhone(e.target.checked)} className="rounded border-white/10 bg-black" />
+                Has Phone
+              </label>
+              <label className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer hover:text-white transition">
+                <input type="checkbox" checked={hasWebsite} onChange={e => setHasWebsite(e.target.checked)} className="rounded border-white/10 bg-black" />
+                Has Website
+              </label>
+            </div>
           </div>
           <div className="flex flex-wrap gap-2">
             <button onClick={() => loadLeads().catch((err) => setError(err.message))} className="inline-flex h-10 items-center gap-2 rounded-lg border border-white/10 bg-white/[0.04] px-4 text-sm text-slate-200">
               <RefreshCw className="h-4 w-4" />
               Refresh
             </button>
+            <button onClick={exportCSV} className="inline-flex h-10 items-center gap-2 rounded-lg border border-white/10 bg-white/[0.04] px-4 text-sm text-slate-200">
+              <Download className="h-4 w-4" />
+              Export CSV
+            </button>
             <button
-              onClick={syncGoogleSheet}
+              onClick={() => syncGoogleSheet(true)}
+              disabled={selectedLeadIds.size === 0 || syncingSheet}
+              className="inline-flex h-10 items-center gap-2 rounded-lg border border-emerald-300/20 bg-emerald-400/10 px-4 text-sm font-medium text-emerald-100 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <CheckSquare className="h-4 w-4" />
+              Sync Selected
+            </button>
+            <button
+              onClick={deleteSelected}
+              disabled={selectedLeadIds.size === 0 || deduping}
+              className="inline-flex h-10 items-center gap-2 rounded-lg border border-red-300/20 bg-red-400/10 px-4 text-sm font-medium text-red-100 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Trash2 className="h-4 w-4" />
+              Delete Selected
+            </button>
+            <button
+              onClick={() => syncGoogleSheet(false)}
               disabled={filteredLeads.length === 0 || syncingSheet}
               className="inline-flex h-10 items-center gap-2 rounded-lg border border-emerald-300/20 bg-emerald-400/10 px-4 text-sm font-medium text-emerald-100 disabled:cursor-not-allowed disabled:opacity-50"
             >
               <FileSpreadsheet className="h-4 w-4" />
-              {syncingSheet ? "Syncing..." : "Sync Google Sheet"}
+              {syncingSheet ? "Syncing..." : "Sync All"}
             </button>
             <button
               onClick={dedupeGoogleSheet}
@@ -516,6 +653,24 @@ export default function Dashboard() {
             <table className="w-full min-w-[1080px] border-collapse text-left text-sm">
               <thead className="border-b border-white/10 bg-white/[0.04] text-xs uppercase tracking-wide text-slate-400">
                 <tr>
+                  <th className="px-4 py-4 w-12 text-center">
+                    <input 
+                      type="checkbox" 
+                      className="rounded border-white/10 bg-black cursor-pointer"
+                      checked={selectedLeadIds.size === paginatedLeads.length && paginatedLeads.length > 0}
+                      onChange={(e) => {
+                        if (e.target.checked) {
+                          const newSet = new Set(selectedLeadIds);
+                          paginatedLeads.forEach(l => newSet.add(l.id));
+                          setSelectedLeadIds(newSet);
+                        } else {
+                          const newSet = new Set(selectedLeadIds);
+                          paginatedLeads.forEach(l => newSet.delete(l.id));
+                          setSelectedLeadIds(newSet);
+                        }
+                      }}
+                    />
+                  </th>
                   <th 
                     className="cursor-pointer px-4 py-4 font-semibold transition hover:text-white"
                     onClick={() => {
@@ -547,7 +702,7 @@ export default function Dashboard() {
                 {loading ? (
                   Array.from({ length: 6 }).map((_, index) => (
                     <tr key={index}>
-                      {Array.from({ length: 3 }).map((__, cellIndex) => (
+                      {Array.from({ length: 4 }).map((__, cellIndex) => (
                         <td key={cellIndex} className="px-4 py-4">
                           <div className="h-4 animate-pulse rounded bg-white/10" />
                         </td>
@@ -556,13 +711,26 @@ export default function Dashboard() {
                   ))
                 ) : filteredLeads.length === 0 ? (
                   <tr>
-                    <td colSpan={3} className="px-5 py-16 text-center text-slate-400">
+                    <td colSpan={4} className="px-5 py-16 text-center text-slate-400">
                       {leads.length === 0 ? "No leads saved yet." : "No leads match this filter."}
                     </td>
                   </tr>
                 ) : (
                   paginatedLeads.map((lead) => (
                     <tr key={lead.id} className="transition hover:bg-white/[0.03]">
+                      <td className="px-4 py-4 text-center">
+                        <input 
+                          type="checkbox" 
+                          className="rounded border-white/10 bg-black cursor-pointer"
+                          checked={selectedLeadIds.has(lead.id)}
+                          onChange={(e) => {
+                            const newSet = new Set(selectedLeadIds);
+                            if (e.target.checked) newSet.add(lead.id);
+                            else newSet.delete(lead.id);
+                            setSelectedLeadIds(newSet);
+                          }}
+                        />
+                      </td>
                       <td className="px-4 py-4">
                         <div className="max-w-72 truncate font-medium text-white" title={lead.business_name}>
                           {lead.business_name}

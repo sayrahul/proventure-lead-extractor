@@ -1,6 +1,33 @@
 import { NextResponse } from "next/server";
 import { upsertLocalLeads } from "@/lib/local-leads";
 import { getSupabaseAdmin, hasSupabaseConfig } from "@/lib/supabase-admin";
+import fs from "fs";
+import path from "path";
+import crypto from "crypto";
+
+const CACHE_DIR = path.join(process.cwd(), ".cache");
+if (!fs.existsSync(CACHE_DIR)) {
+  fs.mkdirSync(CACHE_DIR, { recursive: true });
+}
+
+function getCache(url: string) {
+  const hash = crypto.createHash("md5").update(url).digest("hex");
+  const cachePath = path.join(CACHE_DIR, `${hash}.json`);
+  if (fs.existsSync(cachePath)) {
+    const stats = fs.statSync(cachePath);
+    const ageDays = (Date.now() - stats.mtimeMs) / (1000 * 60 * 60 * 24);
+    if (ageDays < 7) {
+      return JSON.parse(fs.readFileSync(cachePath, "utf-8"));
+    }
+  }
+  return null;
+}
+
+function setCache(url: string, data: any) {
+  const hash = crypto.createHash("md5").update(url).digest("hex");
+  const cachePath = path.join(CACHE_DIR, `${hash}.json`);
+  fs.writeFileSync(cachePath, JSON.stringify(data));
+}
 
 type TextSearchResult = {
   place_id?: string;
@@ -76,7 +103,12 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function fetchJson(url: string) {
+async function fetchJson(url: string, trackRequest?: () => void) {
+  const cached = getCache(url);
+  if (cached) return cached;
+
+  if (trackRequest) trackRequest();
+
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), GOOGLE_TIMEOUT_MS);
 
@@ -88,6 +120,7 @@ async function fetchJson(url: string) {
       throw new Error(payload.error_message || payload.status || "Google Places request failed.");
     }
 
+    setCache(url, payload);
     return payload;
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
@@ -152,7 +185,7 @@ function passesSaveFilter(place: PlaceDetailsResult, saveFilter: SaveFilter) {
 
 export async function POST(request: Request) {
   try {
-    const { keywords, location, depth, saveFilter } = await request.json();
+    const { keywords, location, depth, saveFilter, maxRequests } = await request.json();
     const locationList = String(location ?? "")
       .split(/[\n,]+/)
       .map((item) => item.trim().replace(/\s+/g, " "))
@@ -188,9 +221,16 @@ export async function POST(request: Request) {
     }
 
     const placeIds = new Set<string>();
+    let networkRequestsMade = 0;
+    const requestLimit = typeof maxRequests === "number" ? maxRequests : Infinity;
+    
+    const trackRequest = () => {
+      networkRequestsMade += 1;
+    };
 
     for (const [keywordIndex, keyword] of keywordList.entries()) {
       for (const [locationIndex, cleanLocation] of locationList.entries()) {
+        if (networkRequestsMade >= requestLimit) break;
         if (keywordIndex > 0 || locationIndex > 0) {
           await sleep(DETAIL_DELAY_MS);
         }
@@ -202,6 +242,8 @@ export async function POST(request: Request) {
             await sleep(PAGE_TOKEN_DELAY_MS);
           }
 
+          if (networkRequestsMade >= requestLimit) break;
+
           const searchUrl = new URL(`${GOOGLE_BASE_URL}/textsearch/json`);
           searchUrl.searchParams.set("query", `${keyword} in ${cleanLocation}`);
           searchUrl.searchParams.set("key", googleApiKey);
@@ -210,7 +252,7 @@ export async function POST(request: Request) {
             searchUrl.searchParams.set("pagetoken", pageToken);
           }
 
-          const searchPayload = (await fetchJson(searchUrl.toString())) as TextSearchPayload;
+          const searchPayload = (await fetchJson(searchUrl.toString(), trackRequest)) as TextSearchPayload;
           const results = searchPayload.results ?? [];
 
           for (const place of results) {
@@ -237,6 +279,8 @@ export async function POST(request: Request) {
     const details: PlaceDetailsResult[] = [];
 
     for (const [index, placeId] of uniquePlaceIds.entries()) {
+      if (networkRequestsMade >= requestLimit) break;
+
       if (index > 0) {
         await sleep(DETAIL_DELAY_MS);
       }
@@ -246,7 +290,7 @@ export async function POST(request: Request) {
       detailsUrl.searchParams.set("fields", DETAILS_FIELDS);
       detailsUrl.searchParams.set("key", googleApiKey);
 
-      const detailsPayload = await fetchJson(detailsUrl.toString());
+      const detailsPayload = await fetchJson(detailsUrl.toString(), trackRequest);
       if (detailsPayload.result?.place_id) {
         details.push(detailsPayload.result);
       }

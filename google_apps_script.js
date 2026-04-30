@@ -34,6 +34,28 @@ function doPost(e) {
     return ContentService.createTextOutput(JSON.stringify({ ok: true, message: "Duplicates removed" })).setMimeType(ContentService.MimeType.JSON);
   }
   
+  if (payload.action === 'delete' && payload.leads) {
+    var data = sheet.getDataRange().getValues();
+    var hds = data[0];
+    var phoneIndex = hds.findIndex(function(h) { return String(h).toLowerCase().indexOf("phone") > -1; });
+    var nameIndex = hds.findIndex(function(h) { return String(h).toLowerCase().indexOf("business") > -1 || String(h).toLowerCase().indexOf("name") > -1; });
+    
+    var phonesToDelete = payload.leads.map(function(l) { return l.phone_number; }).filter(Boolean);
+    var namesToDelete = payload.leads.map(function(l) { return l.business_name; }).filter(Boolean);
+    
+    var deleted = 0;
+    for (var i = data.length - 1; i >= 1; i--) {
+      var rowPhone = phoneIndex > -1 ? data[i][phoneIndex] : null;
+      var rowName = nameIndex > -1 ? data[i][nameIndex] : null;
+      
+      if ((rowPhone && phonesToDelete.indexOf(rowPhone) > -1) || (rowName && namesToDelete.indexOf(rowName) > -1)) {
+        sheet.deleteRow(i + 1);
+        deleted++;
+      }
+    }
+    return ContentService.createTextOutput(JSON.stringify({ ok: true, message: "Deleted " + deleted + " rows" })).setMimeType(ContentService.MimeType.JSON);
+  }
+  
   if (payload.leads) {
     var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
     var newRows = [];
