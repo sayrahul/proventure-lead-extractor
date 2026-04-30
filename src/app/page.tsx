@@ -75,6 +75,7 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [extracting, setExtracting] = useState(false);
   const [syncingSheet, setSyncingSheet] = useState(false);
+  const [deduping, setDeduping] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [extractStatus, setExtractStatus] = useState("");
@@ -261,6 +262,32 @@ export default function Dashboard() {
       setError(err instanceof Error ? err.message : "Google Sheet sync failed.");
     } finally {
       setSyncingSheet(false);
+    }
+  }
+
+  async function dedupeGoogleSheet() {
+    setDeduping(true);
+    setError("");
+    setNotice("");
+
+    try {
+      const response = await fetch("/api/sheets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "dedupe" }),
+      });
+      const payload = await response.json();
+
+      if (!response.ok) {
+        throw new Error(payload.error || "Failed to remove duplicates.");
+      }
+
+      setNotice("Successfully removed duplicates from Google Sheets.");
+      await loadLeads();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to remove duplicates.");
+    } finally {
+      setDeduping(false);
     }
   }
 
@@ -473,6 +500,13 @@ export default function Dashboard() {
             >
               <FileSpreadsheet className="h-4 w-4" />
               {syncingSheet ? "Syncing..." : "Sync Google Sheet"}
+            </button>
+            <button
+              onClick={dedupeGoogleSheet}
+              disabled={deduping || syncingSheet}
+              className="inline-flex h-10 items-center gap-2 rounded-lg border border-amber-300/20 bg-amber-400/10 px-4 text-sm font-medium text-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {deduping ? "Cleaning..." : "Remove Duplicates"}
             </button>
           </div>
         </section>

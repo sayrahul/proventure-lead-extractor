@@ -19,7 +19,7 @@ type SheetLead = Pick<
 
 export async function POST(request: Request) {
   try {
-    const { leads } = (await request.json()) as { leads?: SheetLead[] };
+    const { leads, action } = (await request.json()) as any;
     const webhookUrl = process.env.GOOGLE_SHEETS_WEBHOOK_URL;
     const token = process.env.GOOGLE_SHEETS_WEBHOOK_TOKEN;
 
@@ -27,7 +27,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Missing GOOGLE_SHEETS_WEBHOOK_URL." }, { status: 500 });
     }
 
-    if (!Array.isArray(leads) || leads.length === 0) {
+    if (!action && (!Array.isArray(leads) || leads.length === 0)) {
       return NextResponse.json({ error: "No leads were selected for Google Sheet sync." }, { status: 400 });
     }
 
@@ -36,6 +36,7 @@ export async function POST(request: Request) {
       headers: { "Content-Type": "text/plain;charset=utf-8" },
       body: JSON.stringify({
         token: token || undefined,
+        action,
         leads,
       }),
       redirect: "follow",
