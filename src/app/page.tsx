@@ -5,11 +5,9 @@ import {
   ArrowUpRight,
   Building2,
   CalendarDays,
-  Database,
   FileSpreadsheet,
   Filter,
   Loader2,
-  Mail,
   MapPin,
   Phone,
   RefreshCw,
@@ -17,6 +15,11 @@ import {
   SlidersHorizontal,
   Sparkles,
   Star,
+  Activity,
+  ChevronDown,
+  ChevronUp,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react";
 import type { Lead } from "@/lib/supabase-admin";
 
@@ -37,6 +40,16 @@ const KEYWORD_PRESETS = [
   "schools, colleges, coaching centers",
   "clinics, hospitals, diagnostic centers",
 ];
+const LOCATION_PRESETS = [
+  "Pune, Maharashtra",
+  "Mumbai, Maharashtra",
+  "Delhi, NCR",
+  "Bangalore, Karnataka",
+  "Hyderabad, Telangana",
+  "Chennai, Tamil Nadu",
+  "Kolkata, West Bengal",
+  "Ahmedabad, Gujarat",
+];
 
 type HistoryItem = {
   keywords: string;
@@ -45,12 +58,6 @@ type HistoryItem = {
   saveFilter: string;
   createdAt: string;
 };
-
-function scoreTone(score: number | null | undefined) {
-  if ((score ?? 0) >= 75) return "text-emerald-200 bg-emerald-400/10 border-emerald-300/20";
-  if ((score ?? 0) >= 50) return "text-cyan-200 bg-cyan-400/10 border-cyan-300/20";
-  return "text-amber-100 bg-amber-400/10 border-amber-300/20";
-}
 
 function ratingText(lead: Lead) {
   if (!lead.google_rating) return "No reviews";
@@ -62,7 +69,6 @@ export default function Dashboard() {
   const [location, setLocation] = useState("Pune, Maharashtra");
   const [depth, setDepth] = useState("normal");
   const [saveFilter, setSaveFilter] = useState("any");
-  const [enrich, setEnrich] = useState(false);
   const [tableFilter, setTableFilter] = useState("");
   const [leads, setLeads] = useState<Lead[]>([]);
   const [history, setHistory] = useState<HistoryItem[]>([]);
@@ -73,6 +79,12 @@ export default function Dashboard() {
   const [notice, setNotice] = useState("");
   const [extractStatus, setExtractStatus] = useState("");
   const [storage, setStorage] = useState<"supabase" | "local" | "">("");
+
+  const [currentPage, setCurrentPage] = useState(1);
+  const itemsPerPage = 50;
+  const [sortField, setSortField] = useState<keyof Lead | "">("");
+  const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
+  const [apiUsage, setApiUsage] = useState(0);
 
   async function loadLeads() {
     setError("");
@@ -96,6 +108,10 @@ export default function Dashboard() {
     const saved = window.localStorage.getItem("proventure-search-history");
     if (saved) {
       setHistory(JSON.parse(saved));
+    }
+    const usage = window.localStorage.getItem("proventure-api-usage");
+    if (usage) {
+      setApiUsage(Number(usage));
     }
   }, []);
 
@@ -140,7 +156,7 @@ export default function Dashboard() {
       const response = await fetch("/api/extract", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ keywords, location, depth, saveFilter, enrich }),
+        body: JSON.stringify({ keywords, location, depth, saveFilter }),
       });
       const payload = await response.json().catch(() => ({ error: "The server returned an unreadable response." }));
 
@@ -151,6 +167,11 @@ export default function Dashboard() {
       setExtractStatus("Saving and refreshing leads...");
       await loadLeads();
       rememberSearch({ keywords, location, depth, saveFilter, createdAt: new Date().toISOString() });
+      
+      const newUsage = apiUsage + (payload.searched || 0) + (payload.discovered || 0);
+      setApiUsage(newUsage);
+      window.localStorage.setItem("proventure-api-usage", String(newUsage));
+
       setNotice(
         `${payload.depth ?? "Normal"} search checked ${payload.discovered ?? 0} Google result${
           (payload.discovered ?? 0) === 1 ? "" : "s"
@@ -173,21 +194,47 @@ export default function Dashboard() {
   const filteredLeads = useMemo(() => {
     const needle = tableFilter.trim().toLowerCase();
 
-    return leads.filter((lead) => {
+    let result = leads.filter((lead) => {
       return (
         !needle ||
-        [lead.business_name, lead.phone_number, lead.website, lead.address, lead.email, lead.search_query]
+        [lead.business_name, lead.phone_number, lead.website, lead.address, lead.search_query]
           .filter(Boolean)
           .some((value) => String(value).toLowerCase().includes(needle))
       );
     });
-  }, [leads, tableFilter]);
+
+    if (sortField) {
+      result = [...result].sort((a, b) => {
+        let valA = a[sortField];
+        let valB = b[sortField];
+        if (typeof valA === "string") valA = valA.toLowerCase();
+        if (typeof valB === "string") valB = valB.toLowerCase();
+        if (valA === valB) return 0;
+        if (valA === null || valA === undefined) return 1;
+        if (valB === null || valB === undefined) return -1;
+        if (valA < valB) return sortOrder === "asc" ? -1 : 1;
+        return sortOrder === "asc" ? 1 : -1;
+      });
+    }
+
+    return result;
+  }, [leads, tableFilter, sortField, sortOrder]);
+
+  const paginatedLeads = useMemo(() => {
+    const start = (currentPage - 1) * itemsPerPage;
+    return filteredLeads.slice(start, start + itemsPerPage);
+  }, [filteredLeads, currentPage, itemsPerPage]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredLeads.length / itemsPerPage));
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [tableFilter, keywords, location]);
 
   const stats = useMemo(() => {
     return {
       total: leads.length,
       phone: leads.filter((lead) => lead.phone_number).length,
-      email: leads.filter((lead) => lead.email).length,
       reviewed: leads.filter((lead) => lead.google_rating).length,
     };
   }, [leads]);
@@ -233,7 +280,6 @@ export default function Dashboard() {
             {[
               ["Leads", stats.total],
               ["Phones", stats.phone],
-              ["Emails", stats.email],
               ["Reviewed", stats.reviewed],
             ].map(([label, value]) => (
               <div key={label} className="rounded-lg border border-white/10 bg-white/[0.04] px-4 py-3">
@@ -241,17 +287,40 @@ export default function Dashboard() {
                 <div className="text-xs text-slate-400">{label}</div>
               </div>
             ))}
+            <div className="rounded-lg border border-cyan-300/20 bg-cyan-400/10 px-4 py-3 text-left">
+              <div className="flex items-center justify-between">
+                <div className="text-xs font-medium text-cyan-100/70">API Free Tier Usage</div>
+                <Activity className="h-4 w-4 text-cyan-300" />
+              </div>
+              <div className="mt-1 flex items-end gap-1">
+                <div className="text-2xl font-semibold text-cyan-100">{apiUsage}</div>
+                <div className="mb-1 text-xs text-cyan-100/50">/ 6250</div>
+              </div>
+              <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-black/20">
+                <div 
+                  className="h-full bg-cyan-400 transition-all duration-500" 
+                  style={{ width: `${Math.min(100, (apiUsage / 6250) * 100)}%` }} 
+                />
+              </div>
+            </div>
           </div>
         </header>
 
         <section className="grid gap-4 py-6 xl:grid-cols-[1fr_22rem]">
           <form onSubmit={extractLeads} className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
             <div className="grid gap-3 lg:grid-cols-[1.4fr_1fr_0.8fr]">
+              <datalist id="keyword-suggestions">
+                {KEYWORD_PRESETS.map((p) => <option key={p} value={p} />)}
+              </datalist>
+              <datalist id="location-suggestions">
+                {LOCATION_PRESETS.map((p) => <option key={p} value={p} />)}
+              </datalist>
               <label>
                 <span className="mb-2 block text-xs font-medium uppercase tracking-wide text-slate-400">Keywords</span>
                 <div className="relative">
                   <Search className="pointer-events-none absolute left-4 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-500" />
                   <input
+                    list="keyword-suggestions"
                     value={keywords}
                     onChange={(event) => setKeywords(event.target.value)}
                     className="h-12 w-full rounded-lg border border-white/10 bg-slate-950/70 pl-12 pr-4 text-sm text-white outline-none transition focus:border-emerald-400/70 focus:ring-4 focus:ring-emerald-500/15"
@@ -261,13 +330,13 @@ export default function Dashboard() {
               <label>
                 <span className="mb-2 block text-xs font-medium uppercase tracking-wide text-slate-400">Locations</span>
                 <div className="relative">
-                  <MapPin className="pointer-events-none absolute left-4 top-4 h-5 w-5 text-slate-500" />
-                  <textarea
+                  <MapPin className="pointer-events-none absolute left-4 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-500" />
+                  <input
+                    list="location-suggestions"
                     value={location}
                     onChange={(event) => setLocation(event.target.value)}
-                    rows={1}
                     placeholder="Pune, Mumbai, Nashik"
-                    className="min-h-12 w-full resize-y rounded-lg border border-white/10 bg-slate-950/70 py-3 pl-12 pr-4 text-sm text-white outline-none transition focus:border-emerald-400/70 focus:ring-4 focus:ring-emerald-500/15"
+                    className="h-12 w-full rounded-lg border border-white/10 bg-slate-950/70 pl-12 pr-4 text-sm text-white outline-none transition focus:border-emerald-400/70 focus:ring-4 focus:ring-emerald-500/15"
                   />
                 </div>
               </label>
@@ -304,10 +373,6 @@ export default function Dashboard() {
                     </option>
                   ))}
                 </select>
-              </label>
-              <label className="flex h-11 items-center gap-2 rounded-lg border border-white/10 bg-slate-950/70 px-3 text-sm text-slate-200">
-                <input checked={enrich} onChange={(event) => setEnrich(event.target.checked)} type="checkbox" />
-                Enrich email/social
               </label>
               <button
                 type="submit"
@@ -363,7 +428,7 @@ export default function Dashboard() {
           </aside>
         </section>
 
-        {(extracting || error || notice || storage === "local") && (
+        {(extracting || error || notice) && (
           <section className="mb-4 space-y-3">
             {extracting && (
               <div className="flex items-center gap-3 rounded-lg border border-emerald-300/20 bg-emerald-400/10 px-4 py-3 text-sm text-emerald-100">
@@ -381,12 +446,6 @@ export default function Dashboard() {
                 {notice}
               </div>
             )}
-            {storage === "local" && (
-              <div className="inline-flex items-center gap-2 rounded-lg border border-white/10 bg-white/[0.04] px-4 py-3 text-sm text-slate-300">
-                <Database className="h-4 w-4 text-emerald-300" />
-                Supabase is not configured, so leads are being saved locally in this project.
-              </div>
-            )}
           </section>
         )}
 
@@ -397,7 +456,7 @@ export default function Dashboard() {
               <input
                 value={tableFilter}
                 onChange={(event) => setTableFilter(event.target.value)}
-                placeholder="Filter name, phone, email, area"
+                placeholder="Filter name, phone, area"
                 className="h-10 w-full rounded-lg border border-white/10 bg-slate-950/70 pl-10 pr-3 text-sm text-white outline-none transition focus:border-emerald-400/70"
               />
             </label>
@@ -423,17 +482,38 @@ export default function Dashboard() {
             <table className="w-full min-w-[1080px] border-collapse text-left text-sm">
               <thead className="border-b border-white/10 bg-white/[0.04] text-xs uppercase tracking-wide text-slate-400">
                 <tr>
-                  <th className="px-4 py-4 font-semibold">Lead</th>
+                  <th 
+                    className="cursor-pointer px-4 py-4 font-semibold transition hover:text-white"
+                    onClick={() => {
+                      setSortField("business_name");
+                      setSortOrder(sortField === "business_name" && sortOrder === "asc" ? "desc" : "asc");
+                    }}
+                  >
+                    <div className="flex items-center gap-1">
+                      Lead
+                      {sortField === "business_name" && (sortOrder === "asc" ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />)}
+                    </div>
+                  </th>
                   <th className="px-4 py-4 font-semibold">Contact</th>
-                  <th className="px-4 py-4 font-semibold">Google Reviews</th>
-                  <th className="px-4 py-4 font-semibold">Quality</th>
+                  <th 
+                    className="cursor-pointer px-4 py-4 font-semibold transition hover:text-white"
+                    onClick={() => {
+                      setSortField("google_rating");
+                      setSortOrder(sortField === "google_rating" && sortOrder === "asc" ? "desc" : "asc");
+                    }}
+                  >
+                    <div className="flex items-center gap-1">
+                      Google Reviews
+                      {sortField === "google_rating" && (sortOrder === "asc" ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />)}
+                    </div>
+                  </th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/5">
                 {loading ? (
                   Array.from({ length: 6 }).map((_, index) => (
                     <tr key={index}>
-                      {Array.from({ length: 4 }).map((__, cellIndex) => (
+                      {Array.from({ length: 3 }).map((__, cellIndex) => (
                         <td key={cellIndex} className="px-4 py-4">
                           <div className="h-4 animate-pulse rounded bg-white/10" />
                         </td>
@@ -442,12 +522,12 @@ export default function Dashboard() {
                   ))
                 ) : filteredLeads.length === 0 ? (
                   <tr>
-                    <td colSpan={4} className="px-5 py-16 text-center text-slate-400">
+                    <td colSpan={3} className="px-5 py-16 text-center text-slate-400">
                       {leads.length === 0 ? "No leads saved yet." : "No leads match this filter."}
                     </td>
                   </tr>
                 ) : (
-                  filteredLeads.map((lead) => (
+                  paginatedLeads.map((lead) => (
                     <tr key={lead.id} className="transition hover:bg-white/[0.03]">
                       <td className="px-4 py-4">
                         <div className="max-w-72 truncate font-medium text-white" title={lead.business_name}>
@@ -463,15 +543,9 @@ export default function Dashboard() {
                         )}
                       </td>
                       <td className="px-4 py-4">
-                        <div className="space-y-1">
-                          <div className="inline-flex items-center gap-2 text-slate-200">
-                            <Phone className="h-3.5 w-3.5 text-emerald-300" />
-                            {lead.phone_number || "N/A"}
-                          </div>
-                          <div className="flex items-center gap-2 text-slate-300">
-                            <Mail className="h-3.5 w-3.5 text-cyan-300" />
-                            <span className="max-w-48 truncate">{lead.email || "N/A"}</span>
-                          </div>
+                        <div className="inline-flex items-center gap-2 text-slate-200">
+                          <Phone className="h-3.5 w-3.5 text-emerald-300" />
+                          {lead.phone_number || "N/A"}
                         </div>
                       </td>
                       <td className="px-4 py-4">
@@ -480,17 +554,35 @@ export default function Dashboard() {
                           {ratingText(lead)}
                         </span>
                       </td>
-                      <td className="px-4 py-4">
-                        <span className={`inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs font-semibold ${scoreTone(lead.quality_score)}`}>
-                          {lead.quality_score ?? 0}
-                        </span>
-                      </td>
                     </tr>
                   ))
                 )}
               </tbody>
             </table>
           </div>
+          {totalPages > 1 && (
+            <div className="flex items-center justify-between border-t border-white/10 bg-white/[0.02] px-4 py-3 sm:px-6">
+              <div className="text-sm text-slate-400">
+                Showing <span className="font-medium text-white">{(currentPage - 1) * itemsPerPage + 1}</span> to <span className="font-medium text-white">{Math.min(currentPage * itemsPerPage, filteredLeads.length)}</span> of <span className="font-medium text-white">{filteredLeads.length}</span> results
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                  disabled={currentPage === 1}
+                  className="inline-flex items-center gap-1 rounded-md border border-white/10 bg-slate-950/50 px-3 py-1.5 text-sm text-white transition hover:bg-white/5 disabled:opacity-50"
+                >
+                  <ChevronLeft className="h-4 w-4" /> Previous
+                </button>
+                <button
+                  onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                  disabled={currentPage === totalPages}
+                  className="inline-flex items-center gap-1 rounded-md border border-white/10 bg-slate-950/50 px-3 py-1.5 text-sm text-white transition hover:bg-white/5 disabled:opacity-50"
+                >
+                  Next <ChevronRight className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+          )}
         </section>
       </div>
     </main>

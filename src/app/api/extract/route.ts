@@ -37,8 +37,6 @@ const DEPTH_CONFIG = {
 type SearchDepth = keyof typeof DEPTH_CONFIG;
 type SaveFilter = "any" | "phone" | "website" | "both";
 
-const EMAIL_PATTERN = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
-const SOCIAL_PATTERN = /https?:\/\/(?:www\.)?(?:linkedin\.com|facebook\.com|instagram\.com|x\.com|twitter\.com)\/[^\s"'<>]+/gi;
 const NOISE_WORDS = new Set([
   "a",
   "an",
@@ -102,38 +100,6 @@ async function fetchJson(url: string) {
   }
 }
 
-async function enrichWebsite(website: string | null) {
-  if (!website) {
-    return { email: null, social_links: [] as string[] };
-  }
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 6000);
-
-  try {
-    const response = await fetch(website, {
-      cache: "no-store",
-      redirect: "follow",
-      signal: controller.signal,
-      headers: { "User-Agent": "Mozilla/5.0 Lead Extractor" },
-    });
-    const html = await response.text();
-    const emails = [...new Set(html.match(EMAIL_PATTERN) ?? [])].filter(
-      (email) => !/\.(png|jpg|jpeg|webp|gif|svg)$/i.test(email),
-    );
-    const socialLinks = [...new Set(html.match(SOCIAL_PATTERN) ?? [])].slice(0, 5);
-
-    return {
-      email: emails[0] ?? null,
-      social_links: socialLinks,
-    };
-  } catch {
-    return { email: null, social_links: [] as string[] };
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
 function tokenize(value: string) {
   return value
     .toLowerCase()
@@ -177,20 +143,6 @@ function isRelevantPlace(place: PlaceDetailsResult, keywords: string[]) {
   return allTerms.some((term) => searchable.includes(term.replaceAll("_", " ")));
 }
 
-function qualityScore(place: PlaceDetailsResult, email: string | null, socialLinks: string[]) {
-  let score = 25;
-
-  if (place.formatted_phone_number) score += 25;
-  if (place.website) score += 20;
-  if (place.formatted_address) score += 10;
-  if (email) score += 15;
-  if (socialLinks.length > 0) score += 5;
-  if ((place.rating ?? 0) >= 4.2) score += 8;
-  if ((place.user_ratings_total ?? 0) >= 50) score += 7;
-
-  return Math.min(score, 100);
-}
-
 function passesSaveFilter(place: PlaceDetailsResult, saveFilter: SaveFilter) {
   if (saveFilter === "phone") return Boolean(place.formatted_phone_number);
   if (saveFilter === "website") return Boolean(place.website);
@@ -200,7 +152,7 @@ function passesSaveFilter(place: PlaceDetailsResult, saveFilter: SaveFilter) {
 
 export async function POST(request: Request) {
   try {
-    const { keywords, location, depth, saveFilter, enrich } = await request.json();
+    const { keywords, location, depth, saveFilter } = await request.json();
     const locationList = String(location ?? "")
       .split(/[\n,]+/)
       .map((item) => item.trim().replace(/\s+/g, " "))
@@ -304,20 +256,18 @@ export async function POST(request: Request) {
     const rows = [];
 
     for (const place of relevantDetails.filter((item) => passesSaveFilter(item, cleanSaveFilter))) {
-      const enriched = enrich ? await enrichWebsite(place.website ?? null) : { email: null, social_links: [] };
-
       rows.push({
         google_place_id: place.place_id ?? "",
         business_name: place.name || "Unnamed business",
         phone_number: place.formatted_phone_number || null,
         website: place.website || null,
         address: place.formatted_address || null,
-        email: enriched.email,
-        social_links: enriched.social_links,
+        email: null,
+        social_links: [],
         google_rating: place.rating ?? null,
         google_review_count: place.user_ratings_total ?? null,
         place_types: place.types ?? [],
-        quality_score: qualityScore(place, enriched.email, enriched.social_links),
+        quality_score: 0,
         notes: null,
         follow_up_date: null,
         search_query: `${keywordList.join(", ")} in ${locationList.join(", ")}`,
